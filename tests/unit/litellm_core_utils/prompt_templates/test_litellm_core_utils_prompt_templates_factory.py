@@ -8,7 +8,7 @@ import time
 import types
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from typing import Final, List, TypeAlias
+from typing import Final, List, TypeAlias, cast
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -41,7 +41,7 @@ from litellm.litellm_core_utils.prompt_templates.factory import (
     sanitize_messages_for_tool_calling,
     THOUGHT_SIGNATURE_SEPARATOR,
 )
-from litellm.types.llms.openai import ChatCompletionAssistantMessage, ChatCompletionToolMessage
+from litellm.types.llms.openai import ChatCompletionAssistantMessage, ChatCompletionToolMessage, ToolMessageContentPart
 from litellm.types.utils import ChatCompletionMessageToolCall, Function
 from litellm.utils import (
     _invalidate_model_cost_lowercase_map,
@@ -67,6 +67,7 @@ from litellm.litellm_core_utils.prompt_templates.factory import (
 from litellm.litellm_core_utils.prompt_templates.common_utils import (
     encrypted_reasoning_signature,
     get_completion_messages,
+    split_message_media,
 )
 from litellm.llms.vertex_ai.gemini.transformation import gemini_convert_messages_with_history
 from litellm.types.llms.bedrock import BedrockConverseReasoningContentBlock
@@ -1865,6 +1866,108 @@ def test_convert_gemini_tool_call_result_with_image_url():
     )
     inline_parts = _get_gemini_function_response_inline_data_parts(result2)
     assert len(inline_parts) == 1
+
+
+@pytest.mark.parametrize(
+    ("content", "mime_type"),
+    [
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "wav"}}, "audio/wav"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "mp3"}}, "audio/mp3"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "flac"}}, "audio/flac"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "pcm"}}, "audio/pcm"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "ogg"}}, "audio/ogg"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "audio/wav"}}, "audio/wav"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "audio/mp3"}}, "audio/mp3"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "audio/flac"}}, "audio/flac"),
+        ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "audio/ogg"}}, "audio/ogg"),
+        ({"type": "file", "file": {"file_data": "c291bmQ=", "format": "audio/wav"}}, "audio/wav"),
+        ({"type": "file", "file": {"file_data": "c291bmQ=", "format": "application/pdf"}}, "application/pdf"),
+        (
+            {"type": "file", "file": {"file_data": "data:video/mp4;base64,c291bmQ="}},
+            "video/mp4",
+        ),
+        (
+            {
+                "type": "file",
+                "file": {"file_data": "data:application/octet-stream;base64,c291bmQ=", "format": "audio/wav"},
+            },
+            "audio/wav",
+        ),
+        (
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:application/octet-stream;base64,c291bmQ=", "format": "image/png"},
+            },
+            "image/png",
+        ),
+    ],
+)
+def test_gemini_tool_media_preserves_payload_and_explicit_mime(content: ToolMessageContentPart, mime_type: str) -> None:
+    message: Final = ChatCompletionToolMessage(
+        role="tool", name="get_media", content=[{"type": "text", "text": '{"ok":true}'}, content]
+    )
+
+    result: Final = convert_to_gemini_tool_call_result(message, None)
+
+    # Nested inlineData contract checked 2026-10-26: https://ai.google.dev/api/generate-content#FunctionResponsePart
+    assert result == [
+        {
+            "function_response": {
+                "name": "get_media",
+                "response": {"ok": True},
+                "parts": [{"inline_data": {"data": "c291bmQ=", "mime_type": mime_type}}],
+            }
+        }
+    ]
+
+
+@pytest.mark.parametrize("part_type", ["file", "input_file"])
+@pytest.mark.parametrize("reference", ["", "opaque-file-id", "https://example.com/media", "gs://bucket/media"])
+@pytest.mark.parametrize(
+    ("payload", "media_format"),
+    [("data:audio/wav;base64,c291bmQ=", None), ("c291bmQ=", "audio/wav")],
+)
+def test_gemini_tool_media_delivers_the_same_inline_audio_that_admission_counts(
+    part_type: str, reference: str, payload: str, media_format: str | None,
+) -> None:
+    fields: Final = {"file_id": reference, "file_data": payload, "format": media_format}
+    block: Final = {"type": "file", "file": fields} if part_type == "file" else {"type": "input_file", **fields}
+    message: Final = cast(  # cast-ok: the adapter also accepts Responses input_file blocks in tool output
+        ChatCompletionToolMessage, {"role": "tool", "name": "get_media", "content": [block]}
+    )
+
+    with respx.mock:
+        delivered: Final = convert_to_gemini_tool_call_result(message, None, custom_llm_provider="vertex_ai")
+    _, measured = split_message_media([message])
+
+    assert delivered == [{"function_response": {
+        "name": "get_media", "response": {"content": ""},
+        "parts": [{"inline_data": {"data": "c291bmQ=", "mime_type": "audio/wav"}}],
+    }}]
+    assert measured == ({"type": "input_audio", "input_audio": {"data": "c291bmQ=", "format": "wav"}},)
+
+
+@pytest.mark.parametrize("inline_data", [None, "", 123])
+@pytest.mark.parametrize("reference", ["https://example.com/image.png", "gs://bucket/image.png"])
+def test_gemini_tool_media_keeps_vertex_reference_when_inline_data_is_absent(
+    inline_data: object, reference: str,
+) -> None:
+    message: Final = cast(  # cast-ok: exercise missing and malformed optional runtime file_data values
+        ChatCompletionToolMessage,
+        {"role": "tool", "name": "get_media", "content": [{"type": "file", "file": {
+            "file_id": reference, "file_data": inline_data, "format": "image/png",
+        }}]},
+    )
+
+    with respx.mock:
+        delivered: Final = convert_to_gemini_tool_call_result(message, None, custom_llm_provider="vertex_ai")
+    _, measured = split_message_media([message])
+
+    assert delivered == [{"function_response": {
+        "name": "get_media", "response": {"content": ""},
+        "parts": [{"file_data": {"file_uri": reference, "mime_type": "image/png"}}],
+    }}]
+    assert measured == ({"type": "image_url", "image_url": {"url": reference, "detail": "auto"}},)
 
 
 def test_convert_gemini_tool_call_result_with_anthropic_image_block():

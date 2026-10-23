@@ -2,17 +2,200 @@
 """
 Test to verify the Google GenAI generate_content adapter functionality
 """
+
 import json
 import unittest
+from typing import Final
 
 import pytest
 
 from litellm.google_genai.main import agenerate_content
-
-
+from litellm.google_genai.adapters.transformation import GoogleGenAIAdapter
+from litellm.llms.vertex_ai.gemini.transformation import gemini_convert_messages_with_history
 
 
 import litellm
+
+
+@pytest.mark.parametrize(("data_key", "mime_key"), [("inline_data", "mime_type"), ("inlineData", "mimeType")])
+@pytest.mark.parametrize(("role", "expected_role"), [("user", "user"), ("model", "assistant")])
+@pytest.mark.parametrize("mime", ["image/png", "audio/wav", "video/mp4", "application/pdf"])
+def test_native_inline_media_preserves_spelling_mime_and_history_role(
+    data_key: str, mime_key: str, role: str, expected_role: str, mime: str
+) -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [{"role": role, "parts": [{"text": "Inspect this"}, {data_key: {mime_key: mime, "data": "bWVkaWE="}}]}]
+    )
+    expected_media: Final = (
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,bWVkaWE=", "format": mime}}
+        if mime.startswith("image/")
+        else {"type": "file", "file": {"file_data": f"data:{mime};base64,bWVkaWE=", "format": mime}}
+    )
+    assert messages == [{"role": expected_role, "content": [{"type": "text", "text": "Inspect this"}, expected_media]}]
+
+
+@pytest.mark.parametrize(
+    ("data_key", "mime_key", "uri_key"),
+    [
+        ("file_data", "mime_type", "file_uri"),
+        ("fileData", "mimeType", "fileUri"),
+    ],
+)
+@pytest.mark.parametrize("mime", ["image/png", "audio/wav", "application/pdf"])
+def test_native_file_references_preserve_explicit_mime_without_fetching(
+    data_key: str, mime_key: str, uri_key: str, mime: str
+) -> None:
+    uri: Final = "gs://media-tests/extensionless"
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [{"role": "user", "parts": [{"text": "Inspect this"}, {data_key: {mime_key: mime, uri_key: uri}}]}]
+    )
+    converted: Final = gemini_convert_messages_with_history(messages, model="gemini-3.8-flash")
+    assert converted[0]["parts"] == [
+        {"text": "Inspect this"},
+        {"file_data": {"mime_type": mime, "file_uri": uri}},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("response_key", "data_key", "mime_key"),
+    [
+        ("functionResponse", "inlineData", "mimeType"),
+        ("function_response", "inline_data", "mime_type"),
+    ],
+)
+@pytest.mark.parametrize("mime", ["image/png", "audio/wav", "application/pdf"])
+def test_native_function_response_preserves_json_and_media_through_roundtrip(
+    response_key: str, data_key: str, mime_key: str, mime: str
+) -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [
+            {"role": "model", "parts": [{"functionCall": {"name": "get_media", "args": {}}}]},
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        response_key: {
+                            "name": "get_media",
+                            "response": {"found": True},
+                            "parts": [{data_key: {mime_key: mime, "data": "bWVkaWE="}}],
+                        }
+                    }
+                ],
+            },
+        ]
+    )
+    converted: Final = gemini_convert_messages_with_history(messages, model="gemini-3.8-flash")
+    response: Final = converted[-1]["parts"][0]["function_response"]
+    assert response["name"] == "get_media"
+    assert response["response"] == {"found": True}
+    assert response["parts"] == [{"inline_data": {"mime_type": mime, "data": "bWVkaWE="}}]
+
+
+@pytest.mark.parametrize("role", ["user", "model"])
+@pytest.mark.parametrize(
+    "invalid_part",
+    [17, {"inline_data": {"data": None}}, {"functionCall": {"name": "lookup", "args": '{"key":"value"}'}}],
+)
+def test_native_invalid_part_preserves_valid_text_and_media_siblings(role: str, invalid_part: object) -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [
+            {
+                "role": role,
+                "parts": [
+                    {"text": "keep"},
+                    invalid_part,
+                    {"inlineData": {"mimeType": "image/png", "data": "bWVkaWE="}},
+                ],
+            }
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "assistant" if role == "model" else "user",
+            "content": [
+                {"type": "text", "text": "keep"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,bWVkaWE=", "format": "image/png"}},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("invalid_content", [None, 17, "bad", {"role": "user", "parts": None}, {"parts": "bad"}])
+def test_native_invalid_content_preserves_neighboring_contents(invalid_content: object) -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [{"parts": [{"text": "before"}]}, invalid_content, {"parts": [{"text": "after"}]}]
+    )
+
+    assert messages == [{"role": "user", "content": "before"}, {"role": "user", "content": "after"}]
+
+
+def test_native_mixed_part_validates_text_media_and_tool_response_independently() -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [
+            {
+                "parts": [
+                    {"text": "keep", "inline_data": {"data": None}},
+                    {"text": 17, "inline_data": {"mime_type": "image/png", "data": "bWVkaWE=", "unknown": 17}},
+                    {"inlineData": {"data": None}, "functionResponse": {"name": "lookup", "response": {"ok": True}}},
+                ]
+            }
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "keep"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,bWVkaWE=", "format": "image/png"}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_lookup", "content": '{"ok": true}'},
+    ]
+
+
+@pytest.mark.parametrize("response_key", ["functionResponse", "function_response"])
+def test_native_function_response_preserves_json_and_valid_nested_media(response_key: str) -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [
+            {
+                "parts": [
+                    {
+                        response_key: {
+                            "name": "lookup",
+                            "response": {"ok": True},
+                            "parts": [
+                                {"inlineData": {"data": None}},
+                                {"inline_data": {"mime_type": "audio/wav", "data": "bWVkaWE="}},
+                                17,
+                            ],
+                        }
+                    }
+                ]
+            }
+        ]
+    )
+
+    assert messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_lookup",
+            "content": [
+                {"type": "text", "text": '{"ok": true}'},
+                {"type": "file", "file": {"file_data": "data:audio/wav;base64,bWVkaWE=", "format": "audio/wav"}},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("invalid_parts", [None, 17, "bad", {"text": "bad"}])
+def test_native_function_response_preserves_json_when_parts_container_is_invalid(invalid_parts: object) -> None:
+    messages: Final = GoogleGenAIAdapter()._transform_contents_to_messages(
+        [{"parts": [{"functionResponse": {"name": "lookup", "response": {"ok": True}, "parts": invalid_parts}}]}]
+    )
+
+    assert messages == [{"role": "tool", "tool_call_id": "call_lookup", "content": '{"ok": true}'}]
 
 
 def test_adapter_import():

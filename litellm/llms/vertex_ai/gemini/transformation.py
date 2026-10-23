@@ -478,7 +478,7 @@ def _normalize_and_validate_gemini_mime_type(mime_type: str, model: str | None) 
     return get_file_mime_type_for_file_type(file_type)
 
 
-def _process_gemini_media(
+def process_gemini_media(
     image_url: str,
     format: str | None = None,
     media_resolution_enum: dict[str, str] | None = None,
@@ -586,6 +586,9 @@ def _process_gemini_media(
         raise Exception(f"Invalid image received - {image_url}")
     except Exception as e:
         raise e
+
+
+_process_gemini_media: Final = process_gemini_media
 
 
 def snake_to_camel(snake_str: str) -> str:
@@ -1029,6 +1032,8 @@ def gemini_convert_messages_with_history(
                     messages[msg_i],
                     last_message_with_tool_calls,
                     forward_function_call_id=forward_function_call_id,
+                    custom_llm_provider=custom_llm_provider,
+                    model=model,
                 )
                 msg_i += 1
                 # Handle both single part and list of parts (for Computer Use with images)

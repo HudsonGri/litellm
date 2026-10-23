@@ -35,6 +35,7 @@ from litellm.litellm_core_utils.token_counter import (
     _get_extrapolating_count_function,
     _get_tiktoken_count_function,
     calculate_img_tokens,
+    estimate_image_tokens,
     high_detail_image_token_upper_bound,
     offload_token_count,
 )
@@ -2023,6 +2024,261 @@ def test_high_detail_image_token_upper_bound_covers_every_image_size(width: int,
 def test_high_detail_image_token_upper_bound_is_reached_by_the_largest_high_res_image() -> None:
     assert calculate_img_tokens(_png_data_url(2000, 768), mode="high") == high_detail_image_token_upper_bound()
     assert calculate_img_tokens(_png_data_url(1, 1), mode="high") < high_detail_image_token_upper_bound()
+
+
+# Image policies verified 2026-10-24: https://developers.openai.com/api/docs/guides/images-vision
+@pytest.mark.parametrize(
+    ("model", "width", "height", "detail", "expected"),
+    [
+        ("gpt-4o", 16, 16, "high", 255),
+        ("gpt-4.1", 1024, 1024, "high", 765),
+        ("gpt-4o-mini", 1024, 1024, "high", 25501),
+        ("gpt-5.1", 1024, 1024, "auto", 630),
+        ("gpt-5", 1024, 1024, "low", 70),
+        ("o1", 1024, 1024, "high", 675),
+        ("o1-pro", 1024, 1024, "high", 675),
+        ("o3", 1024, 1024, "low", 75),
+        ("openai/gpt-4o-2024-08-06", 2048, 4096, "auto", 1105),
+        ("azure/gpt-4.1", 1024, 1024, "low", 85),
+        ("openrouter/openai/gpt-4o-mini", 16, 16, "low", 2833),
+        ("gpt-6-astra", 1024, 1024, "high", 1229),
+        ("gpt-6-astra", 2048, 2048, "high", 3000),
+        ("gpt-6-astra", 4096, 512, "high", 2458),
+        ("gpt-6-astra", 2048, 2048, "auto", 4916),
+        ("gpt-6-astra", 2048, 2048, "low", 308),
+        ("gpt-5.6-sol", 4096, 512, "high", 615),
+        ("gpt-5.6-terra", 2048, 2048, "original", 4916),
+        ("gpt-5.6-luna", 2048, 2048, "auto", 4916),
+        ("gpt-5.5", 6400, 6400, "original", 12000),
+        ("gpt-5.4", 2048, 2048, "low", 4916),
+        ("gpt-5.4-mini", 2048, 2048, "auto", 3000),
+        ("gpt-5.4-nano", 6400, 6400, "original", 12000),
+        ("gpt-5.2", 4096, 512, "auto", 615),
+        ("gpt-4.1-mini-2025-04-14", 1024, 1024, "low", 1659),
+        ("gpt-6-astra", 16, 16, "original", 2),
+    ],
+)
+def test_image_estimate_uses_model_resolution_and_detail(
+    model: str, width: int, height: int, detail: str, expected: int
+) -> None:
+    assert estimate_image_tokens(model, _png_data_url(width, height), detail) == expected
+
+
+@pytest.mark.parametrize(
+    ("model", "data", "detail"),
+    [
+        ("unregistered-model", _png_data_url(1024, 1024), "high"),
+        ("gpt-4.1-unrecognized", _png_data_url(1024, 1024), "high"),
+        ("other/gpt-4o", _png_data_url(1024, 1024), "high"),
+        ("gpt-4.1-nano", _png_data_url(1024, 1024), "high"),
+        ("gpt-4o", _png_data_url(1024, 1024), "original"),
+        ("gpt-5.2", _png_data_url(1024, 1024), "original"),
+        ("gpt-6-astra", _png_data_url(1024, 1024), "invalid"),
+    ],
+)
+def test_image_estimate_falls_back_when_policy_is_unavailable(model: str, data: str, detail: str) -> None:
+    assert estimate_image_tokens(model, data, detail) == litellm.constants.DEFAULT_IMAGE_TOKEN_COUNT
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "",
+        "data:image/png;base64,not base64!",
+        "data:image/png;base64," + base64.b64encode(b"unknown format").decode(),
+        "data:image/jpeg;base64,/9j/",
+        "data:image/webp;base64," + base64.b64encode(b"RIFF\0\0\0\0WEBPbad!").decode(),
+        _png_data_url(0, 1024),
+        "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n").decode(),
+    ],
+)
+def test_image_estimate_uses_known_policy_when_dimensions_are_unavailable(data: str) -> None:
+    assert estimate_image_tokens("gpt-4o", data, "high") == high_detail_image_token_upper_bound()
+    assert estimate_image_tokens("gpt-4o", data, "low") == estimate_image_tokens(
+        "gpt-4o", _png_data_url(1024, 1024), "low"
+    )
+
+
+# Unavailable dimensions use documented limits, verified 2026-10-26:
+# https://developers.openai.com/api/docs/guides/images-vision (30,000 accepted patches before the multiplier)
+@pytest.mark.parametrize(
+    ("model", "detail", "expected"),
+    [
+        ("gpt-4o", "high", high_detail_image_token_upper_bound()),
+        ("gpt-4o-mini", "auto", high_detail_image_token_upper_bound(2833, 5667)),
+        ("gpt-6-astra", "original", 36_000),
+        ("gpt-6-astra", "high", 3000),
+        ("gpt-6-astra", "low", 308),
+        ("gpt-4o-mini", "low", 2833),
+    ],
+)
+def test_image_estimate_does_not_fetch_remote_media(model: str, detail: str, expected: int) -> None:
+    with patch("httpx.Client.send") as send:
+        assert estimate_image_tokens(model, "https://image.invalid/large.png", detail) == expected
+    send.assert_not_called()
+
+
+def test_image_estimate_bounds_decoding_independent_of_payload_size() -> None:
+    header: Final = base64.b64decode(_png_data_url(1024, 1024).split(",", 1)[1])
+    data: Final = "data:image/png;base64," + base64.b64encode(header + b"\0" * 4_000_000).decode()
+    with patch("base64.b64decode", wraps=base64.b64decode) as decode_header:
+        assert estimate_image_tokens("gpt-6-astra", data, "high") == 1229
+    assert max(len(call.args[0]) for call in decode_header.call_args_list) <= 65_536
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        "openai/",
+        "azure/",
+        "azure/openai/",
+        "azure_ai/",
+        "azure_ai/openai/",
+        "openrouter/openai/",
+        "azure/responses/",
+        "azure/o_series/",
+    ],
+)
+@pytest.mark.parametrize("family", ["gpt-4o-mini", "gpt-6-astra"])
+@pytest.mark.parametrize("detail", ["low", "high"])
+def test_image_estimate_preserves_policy_across_supported_model_identity_layers(
+    prefix: str, family: str, detail: str
+) -> None:
+    remote: Final = "https://image.invalid/photo.png"
+    inline: Final = _png_data_url(1024, 1024)
+
+    assert estimate_image_tokens(f"{prefix}{family}", remote, detail) == estimate_image_tokens(family, remote, detail)
+    assert estimate_image_tokens(f"{prefix}{family}-2026-10-01", inline, detail) == estimate_image_tokens(
+        family, inline, detail
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "family"),
+    [("azure/gpt-41", "gpt-4.1"), ("azure/gpt-41-mini", "gpt-4.1-mini"), ("azure/openai/gpt-41-mini", "gpt-4.1-mini")],
+)
+def test_image_estimate_uses_owned_azure_model_aliases(model: str, family: str) -> None:
+    data: Final = _png_data_url(1024, 1024)
+    assert estimate_image_tokens(model, data, "high") == estimate_image_tokens(family, data, "high")
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "other/gpt-4o",
+        "other/openai/gpt-4o",
+        "azure/opaque/gpt-4o",
+        "openai/azure/gpt-4o",
+        "azure/openai/openai/gpt-4o",
+        "openrouter/other/gpt-4o",
+        "azure/gpt-4o-custom",
+        "azure/openai/deployment-prod",
+    ],
+)
+def test_image_estimate_does_not_infer_policy_from_opaque_namespaces(model: str) -> None:
+    assert (
+        estimate_image_tokens(model, _png_data_url(1024, 1024), "high") == litellm.constants.DEFAULT_IMAGE_TOKEN_COUNT
+    )
+
+
+def test_image_estimate_recognizes_cataloged_azure_names_without_caching_unknowns() -> None:
+    model: Final = "azure/image-policy-test-region/gpt-4o-mini"
+    data: Final = _png_data_url(1024, 1024)
+    assert estimate_image_tokens(model, data, "high") == litellm.constants.DEFAULT_IMAGE_TOKEN_COUNT
+
+    litellm.register_model(
+        {model: {"litellm_provider": "azure", "mode": "chat", "input_cost_per_token": 0, "output_cost_per_token": 0}}
+    )
+
+    assert estimate_image_tokens(model, data, "high") == estimate_image_tokens("gpt-4o-mini", data, "high")
+
+
+@pytest.mark.parametrize(
+    ("models", "fallback", "expected_model"),
+    [
+        (("azure/deployment-prod",), "gpt-4o", "gpt-4o"),
+        (("openai/gpt-4o",), "gpt-4o-mini", "gpt-4o"),
+        (("azure/deployment-prod", "openai/gpt-4o"), "gpt-4o-mini", "gpt-4o-mini"),
+        (("openai/gpt-4o", "openai/gpt-4o-mini"), None, "gpt-4o-mini"),
+        ((), "gpt-6-astra", "gpt-6-astra"),
+        (("other/gpt-4o-mini",), "unregistered-model", "unregistered-model"),
+        (("azure/openai/gpt-4o",), "gpt-4o-mini", "gpt-4o"),
+        (("azure/openai/deployment-prod",), "azure_ai/openai/gpt-4o-mini", "gpt-4o-mini"),
+        (("azure/openai/gpt-4o", "azure/openai/deployment-prod"), "gpt-4o-mini", "gpt-4o-mini"),
+    ],
+)
+def test_image_estimate_prefers_each_backend_policy_over_the_requested_model(
+    models: tuple[str, ...], fallback: str | None, expected_model: str
+) -> None:
+    data: Final = _png_data_url(1024, 1024)
+    assert estimate_image_tokens(models, data, "high", fallback_model=fallback) == estimate_image_tokens(
+        expected_model, data, "high"
+    )
+
+
+def test_image_estimate_decodes_dimensions_once_for_multiple_deployments() -> None:
+    data: Final = _png_data_url(1024, 1024)
+    expected: Final = estimate_image_tokens("gpt-4o-mini", data, "high")
+    with patch("base64.b64decode", wraps=base64.b64decode) as decode_header:
+        actual: Final = estimate_image_tokens(
+            ("gpt-4o", "gpt-6-astra", "azure/deployment-prod"), data, "high", fallback_model="gpt-4o-mini"
+        )
+    assert actual == expected
+    assert decode_header.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("model", "detail"),
+    [
+        ("gpt-4o-mini", "high"),
+        ("gpt-4o-mini", "auto"),
+        ("gpt-6-astra", "high"),
+        ("gpt-6-astra", "low"),
+        ("gpt-6-astra", "original"),
+        ("gpt-5.6-sol", "auto"),
+        ("gpt-5.5", "original"),
+        ("gpt-5.4-mini", "low"),
+        ("gpt-5.4-mini", "high"),
+        ("gpt-5.2", "auto"),
+        ("gpt-4.1-mini", "auto"),
+    ],
+)
+def test_known_model_remote_estimate_covers_supported_inline_sizes(model: str, detail: str) -> None:
+    remote: Final = estimate_image_tokens(model, "https://image.invalid/photo.png", detail)
+    assert remote >= max(
+        estimate_image_tokens(model, _png_data_url(width, height), detail)
+        for width, height in ((16, 16), (1024, 1024), (4096, 4096), (768, 2000))
+    )
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        b"GIF89a" + (1024).to_bytes(2, "little") + (512).to_bytes(2, "little"),
+        b"\xff\xd8\xff\xc0\x00\x0b\x08" + (512).to_bytes(2, "big") + (1024).to_bytes(2, "big"),
+        b"RIFF\0\0\0\0WEBPVP8X" + b"\0" * 8 + (1023).to_bytes(3, "little") + (511).to_bytes(3, "little"),
+        b"RIFF\0\0\0\0WEBPVP8 " + b"\0" * 10 + (1024).to_bytes(2, "little") + (512).to_bytes(2, "little"),
+        b"RIFF\0\0\0\0WEBPVP8L" + b"\0" * 5 + (1023 | (511 << 14)).to_bytes(4, "little"),
+    ],
+)
+def test_image_estimate_reads_supported_image_headers(header: bytes) -> None:
+    data: Final = "data:image/octet-stream;base64," + base64.b64encode(header).decode()
+    assert estimate_image_tokens("gpt-4o", data, "high") == estimate_image_tokens(
+        "gpt-4o", _png_data_url(1024, 512), "high"
+    )
+
+
+def test_image_estimate_falls_back_when_dimensions_are_beyond_header_budget() -> None:
+    jpeg: Final = (
+        b"\xff\xd8\xff\xe1\xff\xff"
+        + b"\0" * 65533
+        + b"\xff\xc0\x00\x0b\x08"
+        + (512).to_bytes(2, "big")
+        + (1024).to_bytes(2, "big")
+    )
+    data: Final = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+    assert estimate_image_tokens("gpt-4o", data, "high") == high_detail_image_token_upper_bound()
 
 
 HUB_SETUP_SCRIPT: Final = """
