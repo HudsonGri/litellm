@@ -12,7 +12,9 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, TypedDict, overload
+
+from typing_extensions import ReadOnly
 
 from litellm._logging import verbose_logger
 from litellm.constants import (
@@ -54,6 +56,10 @@ class _DeploymentLike(Protocol):
     def get(self, key: Literal["model_info"], /) -> _ModelInfoLike | None: ...
     @overload
     def get(self, key: Literal["model_name"], /) -> object: ...
+
+
+class _DeploymentWithModelInfo(TypedDict, total=False):
+    model_info: ReadOnly[Mapping[str, object]]
 
 
 class _MetadataLike(Protocol):
@@ -285,18 +291,14 @@ def _unknown_required_tag_hides_an_answer(
 
 def _chain_allows_fail_open(
     healthy_deployments: _DeploymentPool,
-    configured_deployments: Iterable[_DeploymentLike | DeploymentTypedDict],
+    configured_deployments: Iterable[_DeploymentLike | _DeploymentWithModelInfo],
     excluded_set: frozenset[str],
     required_set: frozenset[str],
     routing_confirmed: frozenset[str],
 ) -> bool:
     if _unknown_required_tag_hides_an_answer(healthy_deployments, excluded_set, required_set, routing_confirmed):
         return False
-    return any(
-        (d.get("model_info") or {}).get("allow_fail_open")  # pyright: ignore[reportUnknownMemberType]  # untyped dict
-        is True
-        for d in configured_deployments
-    )
+    return any((d.get("model_info") or {}).get("allow_fail_open") is True for d in configured_deployments)
 
 
 def _trusted_only_pool(
