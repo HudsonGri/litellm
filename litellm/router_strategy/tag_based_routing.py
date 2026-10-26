@@ -292,7 +292,13 @@ def _chain_allows_fail_open(
 ) -> bool:
     if _unknown_required_tag_hides_an_answer(healthy_deployments, excluded_set, required_set, routing_confirmed):
         return False
-    return any((d.get("model_info") or {}).get("allow_fail_open") is True for d in configured_deployments)
+    for deployment in configured_deployments:
+        match deployment:
+            case {"model_info": {"allow_fail_open": True}}:
+                return True
+            case _:
+                continue
+    return False
 
 
 def _trusted_only_pool(
