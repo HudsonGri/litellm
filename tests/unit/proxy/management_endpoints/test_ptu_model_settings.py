@@ -40,6 +40,7 @@ from litellm.proxy.management_endpoints.model_management_endpoints import (
 from litellm.proxy.spend_tracking.ptu_feature_flag import PTU_COST_ATTRIBUTION_ENV_VAR
 from litellm.repositories.chunked_in import IN_LIST_CHUNK_SIZE
 from litellm.router import Router
+from litellm.types.proxy.management_endpoints.model_management_endpoints import PatchModelRequest
 from litellm.types.router import (
     SPECIAL_MODEL_INFO_PARAMS,
     Deployment,
@@ -1204,6 +1205,51 @@ class TestPtuDeploymentsAreNotBilledPerToken:
         )
         for blob in ("model_info", "litellm_params"):
             assert json.loads(written[blob])["input_cost_per_token"] == 0, blob
+
+    @pytest.mark.parametrize("field", [
+        "input_cost_per_token", "cache_read_input_token_cost", "input_cost_per_second",
+        "tiered_pricing", "search_context_cost_per_query",
+    ])
+    def test_removing_ptu_managed_pricing_is_rejected(self, field: str) -> None:
+        original: Final = _deployment_with_stored_ptu()
+        configured: Final = original.model_copy(update={
+            "litellm_params": original.litellm_params.model_copy(update={"input_cost_per_second": 0.0}),
+        })
+        with pytest.raises(HTTPException) as exc:
+            update_db_model(
+                db_model=_ptu_priced_deployment(configured),
+                updated_patch=PatchModelRequest(litellm_params_to_remove=(field,)),
+            )
+        assert exc.value.status_code == 400
+        assert field in exc.value.detail
+        assert "ptu_count and cost_per_ptu_per_hour" in exc.value.detail
+
+    @pytest.mark.parametrize("mode", ["extra", "disabled", "cleared"])
+    def test_allowed_ptu_removals_stay_absent_after_another_save(
+        self, monkeypatch: pytest.MonkeyPatch, mode: str
+    ) -> None:
+        original: Final = _ptu_priced_deployment(_deployment_with_stored_ptu())
+        configured: Final = original.model_copy(update={
+            "litellm_params": original.litellm_params.model_copy(update={"temperature": 0.4}),
+        })
+        if mode == "disabled":
+            monkeypatch.delenv(PTU_COST_ATTRIBUTION_ENV_VAR)
+        field: Final = "temperature" if mode == "extra" else "input_cost_per_token"
+        written: Final = update_db_model(
+            db_model=configured,
+            updated_patch=PatchModelRequest(
+                litellm_params_to_remove=(field,),
+                model_info=ModelInfo(ptu_count=None, cost_per_ptu_per_hour=None) if mode == "cleared" else None,
+            ),
+        )
+        reloaded: Final = Deployment.model_validate({
+            "model_name": written["model_name"], "litellm_params": json.loads(written["litellm_params"]),
+            "model_info": json.loads(written["model_info"]),
+        })
+        saved_again: Final = update_db_model(db_model=reloaded, updated_patch=updateDeployment(model_name="renamed"))
+        for result in (written, saved_again):
+            assert field not in json.loads(result["litellm_params"])
+            assert field not in json.loads(result["model_info"])
 
     def test_a_patch_pricing_a_ptu_deployment_is_refused(self):
         with pytest.raises(HTTPException) as exc:
