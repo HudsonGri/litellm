@@ -1400,6 +1400,21 @@ class TestShouldRedactFailedRequest:
         monkeypatch.setattr(litellm, "turn_off_message_logging", True)
         assert should_redact_failed_request(_request_data(turn_off_message_logging=False)) is False
 
+    @pytest.mark.parametrize("headers", [None, "x", ["a"]], ids=["none", "str", "list"])
+    @pytest.mark.parametrize("global_on", [True, False], ids=["global_on", "global_off"])
+    def test_non_mapping_headers_follow_the_global_setting(self, monkeypatch, headers, global_on):
+        from litellm.litellm_core_utils.redact_messages import should_redact_failed_request
+
+        monkeypatch.setattr(litellm, "turn_off_message_logging", global_on)
+        assert should_redact_failed_request(_request_data(metadata={"headers": headers})) is global_on
+
+    def test_non_mapping_headers_keep_the_dynamic_param(self, monkeypatch):
+        from litellm.litellm_core_utils.redact_messages import should_redact_failed_request
+
+        monkeypatch.setattr(litellm, "turn_off_message_logging", True)
+        request_data = _request_data(metadata={"headers": "x"}, turn_off_message_logging=False)
+        assert should_redact_failed_request(request_data) is False
+
     def test_dynamic_param_in_metadata_slot(self):
         from litellm.litellm_core_utils.redact_messages import should_redact_failed_request
 

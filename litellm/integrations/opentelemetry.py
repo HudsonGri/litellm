@@ -2298,9 +2298,9 @@ class OpenTelemetry(OTELGenAISemconvMixin, CustomLogger):
             from litellm.integrations._types.open_inference import (
                 ErrorAttributes,
             )
-            from litellm.litellm_core_utils.redact_messages import should_redact_message_logging
+            from litellm.litellm_core_utils.redact_messages import should_redact_failure_logging
 
-            redact: Final = should_redact_message_logging(kwargs) if redact_content is None else redact_content
+            redact: Final = should_redact_failure_logging(kwargs) if redact_content is None else redact_content
 
             # Get the exception object if available
             exception: Final = kwargs.get("exception")

@@ -430,7 +430,7 @@ def should_redact_failed_request(request_data: Mapping[str, object]) -> bool:
             if key == "metadata" or key in request_data
         }
     )
-    return should_redact_message_logging(
+    return should_redact_failure_logging(
         {
             "litellm_params": litellm_params,
             "standard_callback_dynamic_params": {"turn_off_message_logging": dynamic_param},
@@ -715,14 +715,33 @@ def should_redact_message_logging(model_call_details: Mapping) -> bool:
             is_redaction_enabled_via_header = True
             break
 
+    return _redaction_decision(
+        _get_turn_off_message_logging_from_dynamic_params(model_call_details),
+        enabled_via_header=is_redaction_enabled_via_header,
+    )
+
+
+def should_redact_failure_logging(model_call_details: Mapping) -> bool:
+    """
+    `should_redact_message_logging` for failure logging, where request headers that are not
+    a mapping carry no redaction header instead of raising.
+    """
+    try:
+        return should_redact_message_logging(model_call_details)
+    except AttributeError:
+        return _redaction_decision(
+            _get_turn_off_message_logging_from_dynamic_params(model_call_details), enabled_via_header=False
+        )
+
+
+def _redaction_decision(dynamic_turn_off: bool | None, *, enabled_via_header: bool) -> bool:
     # Priority 1: Check dynamic parameter first (if explicitly set)
-    dynamic_turn_off: Final = _get_turn_off_message_logging_from_dynamic_params(model_call_details)
     if dynamic_turn_off is not None:
         # Dynamic parameter is explicitly set, use it
         return dynamic_turn_off
 
     # Priority 2: Check if header explicitly enables redaction
-    if is_redaction_enabled_via_header:
+    if enabled_via_header:
         return True
 
     # Priority 3: Fall back to global setting
@@ -737,6 +756,12 @@ def redact_message_input_output_from_logging(model_call_details: dict, result, i
     if should_redact_message_logging(model_call_details):
         return perform_redaction(model_call_details, result)
     return result
+
+
+def redact_failure_from_logging(model_call_details: dict[str, object]) -> None:
+    """Redacts the failure logging object in place when `should_redact_failure_logging` says so"""
+    if should_redact_failure_logging(model_call_details):
+        perform_redaction(model_call_details, None)
 
 
 def _get_turn_off_message_logging_from_dynamic_params(

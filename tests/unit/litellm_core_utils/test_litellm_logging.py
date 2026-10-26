@@ -11546,6 +11546,28 @@ async def test_async_failure_handler_honours_excluded_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("headers", [None, "x", ["a"]], ids=["none", "str", "list"])
+@pytest.mark.parametrize("redaction_on", [True, False], ids=["redaction_on", "redaction_off"])
+async def test_async_failure_handler_logs_requests_with_non_mapping_headers(monkeypatch, headers, redaction_on):
+    secret = "secret-prompt-marker"
+    capture = _CapturingFailureLogger()
+    monkeypatch.setattr(litellm, "turn_off_message_logging", redaction_on)
+    monkeypatch.setattr(litellm, "_async_failure_callback", [capture])
+    monkeypatch.setattr(litellm, "standard_logging_payload_excluded_fields", None)
+    logging_obj = _failure_logging_obj(secret)
+    logging_obj.model_call_details["litellm_params"] = {"metadata": {"headers": headers}}
+
+    await logging_obj.async_failure_handler(
+        litellm.BadRequestError(message=f"Unsupported content: {secret}", model="gpt-4o", llm_provider="openai"),
+        f"Traceback ... {secret} ...",
+    )
+
+    assert capture.async_kwargs is not None
+    logged = str(capture.async_kwargs.get("traceback_exception"))
+    assert (secret in logged) is not redaction_on, logged
+
+
+@pytest.mark.asyncio
 async def test_per_callback_turn_off_redacts_error_fields_even_for_self_redacting_logger(monkeypatch):
     secret = "secret-prompt-marker"
 

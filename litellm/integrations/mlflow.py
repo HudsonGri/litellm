@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Final
 from litellm._logging import verbose_logger
 from litellm.constants import REDACTED_BY_LITELLM
 from litellm.integrations.custom_logger import CustomLogger
-from litellm.litellm_core_utils.redact_messages import should_redact_message_logging
+from litellm.litellm_core_utils.redact_messages import should_redact_failure_logging
 
 if TYPE_CHECKING:
     from litellm.types.utils import StandardLoggingPayload
@@ -100,7 +100,7 @@ class MlflowLogger(CustomLogger):
                             "exception.stacktrace": REDACTED_BY_LITELLM,
                         },
                     )
-                    if should_redact_message_logging(kwargs)
+                    if should_redact_failure_logging(kwargs)
                     else SpanEvent.from_exception(exception)
                 )
                 span.add_event(exception_event)

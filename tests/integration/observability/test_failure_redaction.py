@@ -955,6 +955,19 @@ def test_e7_spend_logs_detail_endpoint_redacted(rig: Rig) -> None:
         assert secret not in json.dumps(detail), json.dumps(detail)[:2000]
 
 
+@pytest.mark.parametrize("headers", ("x", None, ["a"]), ids=lambda v: type(v).__name__)
+def test_e8_non_mapping_metadata_headers_keep_the_401(rig_off: Rig, headers: JsonValue) -> None:
+    with rig_off.proxy.scenario() as scenario:
+        model: Final = scenario.model(api_base=rig_off.provider.url + "/v1", api_key="synthetic-provider-key")
+        rejected: Final = rig_off.proxy.request(
+            "POST",
+            "/v1/chat/completions",
+            {"model": model, "messages": [{"role": "user", "content": "hi"}], "metadata": {"headers": headers}},
+            key="sk-bogus",
+        )
+        assert rejected.status_code == 401, rejected.text
+
+
 # --- F. Edge ----------------------------------------------------------------------------
 
 _F1_SLOTS: Final = ("top", "metadata", "litellm_metadata")
