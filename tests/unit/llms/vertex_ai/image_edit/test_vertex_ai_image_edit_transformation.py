@@ -3,22 +3,83 @@ import json
 import os
 from datetime import datetime
 from io import BytesIO
-from typing import Dict
+from typing import Dict, Final
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 import litellm
 from litellm.litellm_core_utils.litellm_logging import Logging
 from litellm.llms.custom_httpx.http_handler import HTTPHandler
+from litellm.llms.gemini.common_utils import map_openai_size_to_gemini_image_config
 from litellm.llms.vertex_ai.image_edit.vertex_gemini_transformation import (
     VertexAIGeminiImageEditConfig,
 )
 from litellm.llms.vertex_ai.image_edit.vertex_imagen_transformation import (
     VertexAIImagenImageEditConfig,
 )
+from litellm.types.router import GenericLiteLLMParams
+
+
+@pytest.mark.parametrize("size", ("1536x1024", "1024x1536", "3072x2048", "auto"))
+def test_vertex_gemini_edit_size_reaches_request(size: str) -> None:
+    model: Final = "gemini-3.1-flash-image"
+    config: Final = VertexAIGeminiImageEditConfig()
+    payload, _ = config.transform_image_edit_request(
+        model,
+        "mountains",
+        BytesIO(b"image"),
+        config.map_openai_params({"size": size}, model, False),
+        GenericLiteLLMParams(),
+        {},
+    )
+    request: Final = TypeAdapter(dict[str, JsonValue]).validate_json(TypeAdapter(str).validate_python(payload))
+    expected: Final = map_openai_size_to_gemini_image_config(size, model) or {}
+    assert request["generationConfig"] == {
+        "response_modalities": ["IMAGE"],
+        **(
+            {"image_config": {"aspect_ratio": expected["aspectRatio"], "image_size": expected["imageSize"]}}
+            if expected
+            else {}
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    "size, expected_ratio",
+    (("1536x1024", "4:3"), ("1024x1536", "3:4"), ("100000x1", "16:9"), ("auto", None)),
+)
+def test_vertex_imagen_edit_size_reaches_request(size: str, expected_ratio: str | None) -> None:
+    model: Final = "imagen-3.0-capability-001"
+    config: Final = VertexAIImagenImageEditConfig()
+    payload, _ = config.transform_image_edit_request(
+        model,
+        "mountains",
+        BytesIO(b"image"),
+        config.map_openai_params({"size": size, "n": 2}, model, False),
+        GenericLiteLLMParams(),
+        {},
+    )
+    request: Final = TypeAdapter(dict[str, JsonValue]).validate_json(TypeAdapter(str).validate_python(payload))
+    assert request["parameters"] == {
+        "sampleCount": 2,
+        "editMode": "EDIT_MODE_INPAINT_INSERTION",
+        "editConfig": {"baseSteps": 50},
+        "guidanceScale": 7.5,
+        "seed": None,
+        **({"aspectRatio": expected_ratio} if expected_ratio is not None else {}),
+    }
+
+
+@pytest.mark.parametrize("size", ("unknown", "0x1024", "-1x1024", "1024x", "3:2"))
+@pytest.mark.parametrize("config_type", (VertexAIGeminiImageEditConfig, VertexAIImagenImageEditConfig))
+def test_vertex_edit_rejects_invalid_size(
+    size: str, config_type: type[VertexAIGeminiImageEditConfig] | type[VertexAIImagenImageEditConfig]
+) -> None:
+    with pytest.raises(litellm.UnsupportedParamsError, match="size"):
+        config_type().map_openai_params({"size": size}, "gemini-3.1-flash-image", False)
 
 
 class TestVertexAIGeminiImageEditTransformation:

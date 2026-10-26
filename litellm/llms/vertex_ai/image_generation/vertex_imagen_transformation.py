@@ -11,6 +11,7 @@ from litellm.llms.base_llm.image_generation.transformation import (
 )
 from litellm.llms.vertex_ai.common_utils import (
     get_vertex_base_url,
+    map_vertex_image_size,
     pop_vertex_request_labels,
 )
 from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexLLM
@@ -56,40 +57,16 @@ class VertexAIImagenImageGenerationConfig(BaseImageGenerationConfig, VertexLLM):
 
     def map_openai_params(
         self,
-        non_default_params: dict,
-        optional_params: dict,
+        non_default_params: Mapping[str, object],
+        optional_params: Mapping[str, object],
         model: str,
         drop_params: bool,
-    ) -> dict:
-        supported_params: Final = self.get_supported_openai_params(model)
-        mapped_params: Final = {}
-
-        for k, v in non_default_params.items():
-            if k not in optional_params:
-                if k in supported_params:
-                    # Map OpenAI parameters to Imagen format
-                    if k == "n":
-                        mapped_params["sampleCount"] = v
-                    elif k == "size":
-                        # Map OpenAI size format to Imagen aspectRatio
-                        mapped_params["aspectRatio"] = self._map_size_to_aspect_ratio(v)
-                    else:
-                        mapped_params[k] = v
-
-        return mapped_params
-
-    def _map_size_to_aspect_ratio(self, size: str) -> str:
-        """
-        Map OpenAI size format to Imagen aspect ratio format
-        """
-        aspect_ratio_map: Final = {
-            "1024x1024": "1:1",
-            "1792x1024": "16:9",
-            "1024x1792": "9:16",
-            "1280x896": "4:3",
-            "896x1280": "3:4",
+    ) -> dict[str, object]:
+        params: Final = {key: value for key, value in non_default_params.items() if key not in optional_params}
+        return {
+            **map_vertex_image_size(params.get("size"), model, imagen=True),
+            **({"sampleCount": params["n"]} if "n" in params else {}),
         }
-        return aspect_ratio_map.get(size, "1:1")
 
     def _resolve_vertex_project(self) -> str | None:
         return (

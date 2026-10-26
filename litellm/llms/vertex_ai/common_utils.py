@@ -1,3 +1,4 @@
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
@@ -33,6 +34,42 @@ GEMINI_VIDEO_METADATA_KEYS: Final = MappingProxyType(
 
 
 GEMINI_FILES_API_URI_PREFIX: Final = "https://generativelanguage.googleapis.com/v1beta/files/"
+
+
+_IMAGEN_ASPECT_RATIOS: Final = MappingProxyType(
+    {"1:1": 1.0, "3:4": 3 / 4, "4:3": 4 / 3, "9:16": 9 / 16, "16:9": 16 / 9}
+)
+
+
+def map_vertex_image_size(size: object, model: str, *, imagen: bool = False) -> dict[str, str]:
+    from litellm.llms.gemini.common_utils import (
+        GEMINI_IMAGE_ASPECT_RATIOS,
+        GEMINI_IMAGE_SIZE_TO_ASPECT_RATIO,
+        map_openai_size_to_gemini_image_config,
+    )
+
+    if size is None or size == "auto":
+        return {}
+    if not isinstance(size, str) or (image_config := map_openai_size_to_gemini_image_config(size, model)) is None:
+        raise litellm.UnsupportedParamsError(
+            message="size must be 'auto' or positive WIDTHxHEIGHT dimensions",
+            model=model,
+            llm_provider="vertex_ai",
+        )
+
+    width, height = map(int, size.lower().split("x"))
+    requested_ratio: Final = width / height
+    aspect_ratio: Final = (
+        min(_IMAGEN_ASPECT_RATIOS, key=lambda ratio: abs(math.log(_IMAGEN_ASPECT_RATIOS[ratio] / requested_ratio)))
+        if imagen
+        else image_config["aspectRatio"]
+    )
+    if (
+        not math.isclose(GEMINI_IMAGE_ASPECT_RATIOS[aspect_ratio], requested_ratio)
+        and GEMINI_IMAGE_SIZE_TO_ASPECT_RATIO.get((width, height)) != aspect_ratio
+    ):
+        verbose_logger.warning("Vertex AI size %s is approximated with aspectRatio %s", size, aspect_ratio)
+    return {"aspectRatio": aspect_ratio} if imagen else image_config
 
 
 def gemini_video_metadata_from_openai(video_metadata: Mapping[str, object]) -> dict[str, object]:

@@ -14,7 +14,7 @@ from litellm.llms.gemini.common_utils import (
     get_gemini_image_web_search_requests,
     map_gemini_image_tools_params,
 )
-from litellm.llms.vertex_ai.common_utils import get_vertex_base_url
+from litellm.llms.vertex_ai.common_utils import get_vertex_base_url, map_vertex_image_size
 from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexLLM
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import AllMessageValues
@@ -74,50 +74,36 @@ class VertexAIGeminiImageGenerationConfig(BaseImageGenerationConfig, VertexLLM):
 
     def map_openai_params(
         self,
-        non_default_params: dict,
-        optional_params: dict,
+        non_default_params: Mapping[str, object],
+        optional_params: Mapping[str, object],
         model: str,
         drop_params: bool,
-    ) -> dict:
-        supported_params: Final = self.get_supported_openai_params(model)
-        mapped_params = {}
-
-        for k, v in non_default_params.items():
-            if k not in optional_params:
-                if k in supported_params:
-                    # Map OpenAI parameters to Gemini format
-                    if k == "n":
-                        mapped_params["candidate_count"] = v
-                    elif k == "size":
-                        # Map OpenAI size format to Gemini aspectRatio
-                        mapped_params["aspectRatio"] = self._map_size_to_aspect_ratio(v)
-                    elif k in ("aspectRatio", "aspect_ratio"):
-                        mapped_params["aspectRatio"] = v
-                    elif k in ("imageSize", "image_size"):
-                        mapped_params["imageSize"] = v
-                    elif k == "imageConfig":
-                        if isinstance(v, dict):
-                            mapped_params["imageConfig"] = v
-                        else:
-                            verbose_logger.warning("imageConfig must be a dict, got %s — ignoring.", type(v).__name__)
-                    elif k not in ("tools", "web_search_options", "imageConfig"):
-                        mapped_params[k] = v
-
-        mapped_params = map_gemini_image_tools_params(non_default_params, mapped_params)
-        return mapped_params
-
-    def _map_size_to_aspect_ratio(self, size: str) -> str:
-        """
-        Map OpenAI size format to Gemini aspect ratio format
-        """
-        aspect_ratio_map: Final = {
-            "1024x1024": "1:1",
-            "1792x1024": "16:9",
-            "1024x1792": "9:16",
-            "1280x896": "4:3",
-            "896x1280": "3:4",
+    ) -> dict[str, object]:
+        params: Final = {key: value for key, value in non_default_params.items() if key not in optional_params}
+        raw_image_config: Final = params.get("imageConfig")
+        if "imageConfig" in params and not isinstance(raw_image_config, dict):
+            verbose_logger.warning("imageConfig must be a dict, got %s, ignoring", type(raw_image_config).__name__)
+        image_config: Final = (
+            _JSON_OBJECT.validate_python(raw_image_config) if isinstance(raw_image_config, dict) else {}
+        )
+        size_config: Final = map_vertex_image_size(params.get("size"), model)
+        native_params: Final = {
+            target: params[key]
+            for key, target in (
+                ("n", "candidate_count"),
+                ("aspect_ratio", "aspectRatio"),
+                ("aspectRatio", "aspectRatio"),
+                ("image_size", "imageSize"),
+                ("imageSize", "imageSize"),
+            )
+            if key in params
         }
-        return aspect_ratio_map.get(size, "1:1")
+        mapped_params: Final = {
+            **{key: value for key, value in size_config.items() if key not in image_config},
+            **({"imageConfig": image_config} if isinstance(raw_image_config, dict) else {}),
+            **native_params,
+        }
+        return map_gemini_image_tools_params(non_default_params, mapped_params)
 
     def _resolve_vertex_project(self) -> str | None:
         return (
