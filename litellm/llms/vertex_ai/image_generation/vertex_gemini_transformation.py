@@ -79,30 +79,34 @@ class VertexAIGeminiImageGenerationConfig(BaseImageGenerationConfig, VertexLLM):
         model: str,
         drop_params: bool,
     ) -> dict[str, object]:
-        params: Final = {key: value for key, value in non_default_params.items() if key not in optional_params}
-        raw_image_config: Final = params.get("imageConfig")
-        if "imageConfig" in params and not isinstance(raw_image_config, dict):
-            verbose_logger.warning("imageConfig must be a dict, got %s, ignoring", type(raw_image_config).__name__)
-        image_config: Final = (
-            _JSON_OBJECT.validate_python(raw_image_config) if isinstance(raw_image_config, dict) else {}
-        )
-        size_config: Final = map_vertex_image_size(params.get("size"), model)
-        native_params: Final = {
-            target: params[key]
-            for key, target in (
-                ("n", "candidate_count"),
-                ("aspect_ratio", "aspectRatio"),
-                ("aspectRatio", "aspectRatio"),
-                ("image_size", "imageSize"),
-                ("imageSize", "imageSize"),
-            )
-            if key in params
-        }
-        mapped_params: Final = {
-            **{key: value for key, value in size_config.items() if key not in image_config},
-            **({"imageConfig": image_config} if isinstance(raw_image_config, dict) else {}),
-            **native_params,
-        }
+        supported_params: Final = self.get_supported_openai_params(model)
+        mapped_params: Final[dict[str, object]] = {}
+
+        for k, v in non_default_params.items():
+            if k not in optional_params:
+                if k in supported_params:
+                    # Map OpenAI parameters to Gemini format
+                    if k == "n":
+                        mapped_params["candidate_count"] = v
+                    elif k == "size":
+                        continue
+                    elif k in ("aspectRatio", "aspect_ratio"):
+                        if k == "aspectRatio" or "aspectRatio" not in mapped_params:
+                            mapped_params["aspectRatio"] = v
+                    elif k in ("imageSize", "image_size"):
+                        if k == "imageSize" or "imageSize" not in mapped_params:
+                            mapped_params["imageSize"] = v
+                    elif k == "imageConfig":
+                        if isinstance(v, dict):
+                            mapped_params["imageConfig"] = _JSON_OBJECT.validate_python(v)
+                        else:
+                            verbose_logger.warning("imageConfig must be a dict, got %s — ignoring.", type(v).__name__)
+        if "size" in non_default_params and "size" not in optional_params:
+            image_config: Final = _JSON_OBJECT.validate_python(mapped_params.get("imageConfig", {}))
+            for key, value in map_vertex_image_size(non_default_params["size"], model).items():
+                if key not in mapped_params and key not in image_config:
+                    mapped_params[key] = value
+
         return map_gemini_image_tools_params(non_default_params, mapped_params)
 
     def _resolve_vertex_project(self) -> str | None:

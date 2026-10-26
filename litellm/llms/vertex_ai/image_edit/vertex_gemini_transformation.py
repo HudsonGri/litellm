@@ -175,11 +175,13 @@ class VertexAIGeminiImageEditConfig(BaseImageEditConfig, VertexLLM):
         contents: Final[dict[str, object]] = {"role": "USER", "parts": parts}
 
         # Add image-specific configuration
-        image_config: Final = {
-            target: image_edit_optional_request_params[key]
-            for key, target in (("aspectRatio", "aspect_ratio"), ("imageSize", "image_size"))
-            if key in image_edit_optional_request_params
-        }
+        image_config: Final = (
+            {"aspect_ratio": image_edit_optional_request_params["aspectRatio"]}
+            if "aspectRatio" in image_edit_optional_request_params
+            else {}
+        )
+        if "imageSize" in image_edit_optional_request_params:
+            image_config["image_size"] = image_edit_optional_request_params["imageSize"]
 
         generation_config: Final[dict[str, object]] = {
             key: value for key, value in (("response_modalities", ["IMAGE"]), ("image_config", image_config)) if value

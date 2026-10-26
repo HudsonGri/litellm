@@ -61,11 +61,24 @@ class VertexAIImagenImageEditConfig(BaseImageEditConfig, VertexLLM):
         model: str,
         drop_params: bool,
     ) -> dict[str, object]:
-        return {
-            **map_vertex_image_size(image_edit_optional_params.get("size"), model, imagen=True),
-            **({"sampleCount": image_edit_optional_params["n"]} if "n" in image_edit_optional_params else {}),
-            **({"mask": image_edit_optional_params["mask"]} if "mask" in image_edit_optional_params else {}),
+        supported_params: Final = self.get_supported_openai_params(model)
+        filtered_params: Final = {
+            key: value for key, value in image_edit_optional_params.items() if key in supported_params
         }
+
+        mapped_params: Final[dict[str, object]] = {}
+
+        # Map OpenAI parameters to Imagen format
+        if "n" in filtered_params:
+            mapped_params["sampleCount"] = filtered_params["n"]
+
+        if "size" in filtered_params:
+            mapped_params.update(map_vertex_image_size(filtered_params["size"], model, imagen=True))
+
+        if "mask" in filtered_params:
+            mapped_params["mask"] = filtered_params["mask"]
+
+        return mapped_params
 
     def _resolve_vertex_project(self) -> str | None:
         return (
@@ -178,12 +191,9 @@ class VertexAIImagenImageEditConfig(BaseImageEditConfig, VertexLLM):
             "sampleCount": sample_count,
             "editMode": edit_mode,
             "editConfig": {"baseSteps": base_steps},
-            **(
-                {"aspectRatio": image_edit_optional_request_params["aspectRatio"]}
-                if "aspectRatio" in image_edit_optional_request_params
-                else {}
-            ),
         }
+        if "aspectRatio" in image_edit_optional_request_params:
+            parameters["aspectRatio"] = image_edit_optional_request_params["aspectRatio"]
 
         # Set default values for Vertex AI-specific parameters (not configurable by users via OpenAI API)
         parameters["guidanceScale"] = 7.5  # Default guidance scale

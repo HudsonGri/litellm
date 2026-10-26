@@ -62,11 +62,22 @@ class VertexAIImagenImageGenerationConfig(BaseImageGenerationConfig, VertexLLM):
         model: str,
         drop_params: bool,
     ) -> dict[str, object]:
-        params: Final = {key: value for key, value in non_default_params.items() if key not in optional_params}
-        return {
-            **map_vertex_image_size(params.get("size"), model, imagen=True),
-            **({"sampleCount": params["n"]} if "n" in params else {}),
-        }
+        supported_params: Final = self.get_supported_openai_params(model)
+        mapped_params: Final[dict[str, object]] = {}
+
+        for k, v in non_default_params.items():
+            if k not in optional_params:
+                if k in supported_params:
+                    # Map OpenAI parameters to Imagen format
+                    if k == "n":
+                        mapped_params["sampleCount"] = v
+                    elif k == "size":
+                        # Map OpenAI size format to Imagen aspectRatio
+                        mapped_params.update(map_vertex_image_size(v, model, imagen=True))
+                    else:
+                        mapped_params[k] = v
+
+        return mapped_params
 
     def _resolve_vertex_project(self) -> str | None:
         return (
