@@ -101,9 +101,12 @@ class VertexAIGeminiImageGenerationConfig(BaseImageGenerationConfig, VertexLLM):
                             mapped_params["imageConfig"] = _JSON_OBJECT.validate_python(v)
                         else:
                             verbose_logger.warning("imageConfig must be a dict, got %s — ignoring.", type(v).__name__)
+
         if "size" in non_default_params and "size" not in optional_params:
             image_config: Final = _JSON_OBJECT.validate_python(mapped_params.get("imageConfig", {}))
-            for key, value in map_vertex_image_size(non_default_params["size"], model).items():
+            for key, value in (
+                map_vertex_image_size(non_default_params["size"], model) or {"aspectRatio": "1:1"}
+            ).items():
                 if key not in mapped_params and key not in image_config:
                     mapped_params[key] = value
 

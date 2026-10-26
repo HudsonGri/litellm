@@ -73,7 +73,7 @@ class VertexAIImagenImageEditConfig(BaseImageEditConfig, VertexLLM):
             mapped_params["sampleCount"] = filtered_params["n"]
 
         if "size" in filtered_params:
-            mapped_params.update(map_vertex_image_size(filtered_params["size"], model, imagen=True))
+            mapped_params.update(map_vertex_image_size(filtered_params["size"], model, imagen=True) or {})
 
         if "mask" in filtered_params:
             mapped_params["mask"] = filtered_params["mask"]

@@ -73,7 +73,7 @@ class VertexAIImagenImageGenerationConfig(BaseImageGenerationConfig, VertexLLM):
                         mapped_params["sampleCount"] = v
                     elif k == "size":
                         # Map OpenAI size format to Imagen aspectRatio
-                        mapped_params.update(map_vertex_image_size(v, model, imagen=True))
+                        mapped_params.update(map_vertex_image_size(v, model, imagen=True) or {"aspectRatio": "1:1"})
                     else:
                         mapped_params[k] = v
 

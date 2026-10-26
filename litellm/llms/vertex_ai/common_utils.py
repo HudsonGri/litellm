@@ -41,21 +41,15 @@ _IMAGEN_ASPECT_RATIOS: Final = MappingProxyType(
 )
 
 
-def map_vertex_image_size(size: object, model: str, *, imagen: bool = False) -> dict[str, str]:
+def map_vertex_image_size(size: object, model: str, *, imagen: bool = False) -> dict[str, str] | None:
     from litellm.llms.gemini.common_utils import (
         GEMINI_IMAGE_ASPECT_RATIOS,
         GEMINI_IMAGE_SIZE_TO_ASPECT_RATIO,
         map_openai_size_to_gemini_image_config,
     )
 
-    if size is None or size == "auto":
-        return {}
     if not isinstance(size, str) or (image_config := map_openai_size_to_gemini_image_config(size, model)) is None:
-        raise litellm.UnsupportedParamsError(
-            message="size must be 'auto' or positive WIDTHxHEIGHT dimensions",
-            model=model,
-            llm_provider="vertex_ai",
-        )
+        return None
 
     width, height = map(int, size.lower().split("x"))
     requested_ratio: Final = width / height

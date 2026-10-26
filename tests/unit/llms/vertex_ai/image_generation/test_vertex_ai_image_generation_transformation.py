@@ -24,7 +24,7 @@ from litellm.llms.vertex_ai.image_generation.vertex_imagen_transformation import
 from litellm.types.utils import ImageResponse
 
 
-@pytest.mark.parametrize("size", ("1536x1024", "1024x1536", "3072x2048", "auto"))
+@pytest.mark.parametrize("size", ("1536x1024", "1024x1536", "3072x2048"))
 def test_vertex_gemini_size_matches_direct_gemini_request(size: str) -> None:
     model: Final = "gemini-3.1-flash-image"
     vertex: Final = VertexAIGeminiImageGenerationConfig()
@@ -42,7 +42,7 @@ def test_vertex_gemini_size_matches_direct_gemini_request(size: str) -> None:
 
 @pytest.mark.parametrize(
     "size, expected_ratio",
-    (("1536x1024", "4:3"), ("1024x1536", "3:4"), ("100000x1", "16:9"), ("auto", None)),
+    (("1536x1024", "4:3"), ("1024x1536", "3:4"), ("100000x1", "16:9")),
 )
 def test_vertex_imagen_generation_size_reaches_request(size: str, expected_ratio: str | None) -> None:
     model: Final = "imagen-4.0-generate-001"
@@ -56,14 +56,36 @@ def test_vertex_imagen_generation_size_reaches_request(size: str, expected_ratio
     }
 
 
-@pytest.mark.parametrize("size", ("unknown", "0x1024", "-1x1024", "1024x", "3:2"))
-@pytest.mark.parametrize("config_type", (VertexAIGeminiImageGenerationConfig, VertexAIImagenImageGenerationConfig))
-def test_vertex_generation_rejects_invalid_size(
+@pytest.mark.parametrize("size", ("auto", "unknown", "0x1024", "-1x1024", "1024x", "3:2"))
+@pytest.mark.parametrize(
+    "config_type, model, config_key, expected",
+    (
+        (
+            VertexAIGeminiImageGenerationConfig,
+            "gemini-3.1-flash-image",
+            "generationConfig",
+            {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "1:1"}},
+        ),
+        (
+            VertexAIImagenImageGenerationConfig,
+            "imagen-4.0-generate-001",
+            "parameters",
+            {"sampleCount": 1, "aspectRatio": "1:1"},
+        ),
+    ),
+)
+def test_vertex_generation_preserves_legacy_size_fallback(
     size: str,
     config_type: type[VertexAIGeminiImageGenerationConfig] | type[VertexAIImagenImageGenerationConfig],
+    model: str,
+    config_key: str,
+    expected: dict[str, object],
 ) -> None:
-    with pytest.raises(litellm.UnsupportedParamsError, match="size"):
-        config_type().map_openai_params({"size": size}, {}, "gemini-3.1-flash-image", False)
+    config: Final = config_type()
+    request: Final = config.transform_image_generation_request(
+        model, "mountains", config.map_openai_params({"size": size}, {}, model, False), {}, {}
+    )
+    assert request[config_key] == expected
 
 
 @pytest.mark.parametrize("config_type", (VertexAIGeminiImageGenerationConfig, VertexAIImagenImageGenerationConfig))

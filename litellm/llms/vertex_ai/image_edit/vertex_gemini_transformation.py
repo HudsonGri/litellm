@@ -66,7 +66,7 @@ class VertexAIGeminiImageEditConfig(BaseImageEditConfig, VertexLLM):
         if "size" not in supported_params or "size" not in image_edit_optional_params:
             return {}
 
-        return map_vertex_image_size(image_edit_optional_params.get("size"), model)
+        return map_vertex_image_size(image_edit_optional_params.get("size"), model) or {"aspectRatio": "1:1"}
 
     def _resolve_vertex_project(self) -> str | None:
         return (
